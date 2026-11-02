@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery Route Optimizer</title>
+<style>
+  :root { --navy:#0b2545; --amber:#f2a541; --ink:#1b263b; --muted:#5c6b7f; --bg:#f3f6fa; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:Calibri,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--navy); color:#fff; padding:14px 24px; }
+  header h1 { margin:0; font-size:22px; font-family:Cambria,Georgia,serif; }
+  header p { margin:2px 0 0; color:#cadcfc; font-size:13px; }
+  main { display:grid; grid-template-columns:300px 1fr; gap:20px; padding:20px 24px; max-width:1200px; margin:0 auto; }
+  @media (max-width:860px) { main { grid-template-columns:1fr; } }
+  .panel { background:#fff; border-radius:10px; padding:16px; box-shadow:0 1px 6px rgba(0,0,0,.1); }
+  label { display:block; font-size:13px; font-weight:600; margin:10px 0 3px; }
+  input, select { width:100%; padding:7px 8px; border:1px solid #c5cfdb; border-radius:6px; font:inherit; }
+  .row { display:flex; gap:8px; } .row > div { flex:1; }
+  button { padding:9px 12px; border:0; border-radius:6px; font:inherit; font-weight:700; cursor:pointer; }
+  .primary { background:var(--amber); color:var(--navy); width:100%; margin-top:16px; }
+  .secondary { background:var(--navy); color:#fff; width:100%; margin-top:8px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  canvas { width:100%; height:auto; background:#fff; border-radius:10px; box-shadow:0 1px 6px rgba(0,0,0,.1); }
+  #error { color:#b00020; font-weight:600; margin:8px 0 0; min-height:1.2em; }
+  #stats { font-size:15px; margin:0 0 10px; font-weight:600; }
+  table { border-collapse:collapse; width:100%; font-size:13px; margin-top:12px; background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 1px 6px rgba(0,0,0,.1); }
+  th, td { padding:7px 10px; text-align:left; border-bottom:1px solid #e6ebf2; }
+  th { background:#e9eef5; }
+  tr.best td { font-weight:700; color:#0a6b3a; }
+  tr.click { cursor:pointer; } tr.click:hover td { background:#fff6e5; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  small { color:var(--muted); }
+</style>
+</head>
+<body>
+<header><h1>Delivery Route Optimizer</h1><p>Plan van routes for customer orders and compare solvers</p></header>
+<main>
+  <section class="panel">
+    <div class="row">
+      <div><label for="n">Orders</label><input id="n" type="number" value="30" min="1" max="500"></div>
+      <div><label for="seed">Seed</label><input id="seed" type="number" value="1"></div>
+    </div>
+    <label for="capacity">Van capacity</label><input id="capacity" type="number" value="30" min="1">
+    <div class="row">
+      <div><label for="dx">Depot x</label><input id="dx" type="number" value="50"></div>
+      <div><label for="dy">Depot y</label><input id="dy" type="number" value="50"></div>
+    </div>
+    <label for="solver">Solver</label>
+    <select id="solver">
+      <option value="cluster">cluster (divide and conquer + DP)</option>
+      <option value="greedy">greedy</option>
+      <option value="greedy-2opt">greedy + 2-opt</option>
+      <option value="exact">exact (max 10 orders)</option>
+    </select>
+    <label for="csv">Or use your own CSV</label>
+    <input id="csv" type="file" accept=".csv"><small id="csvHint">Columns: id,x,y,demand</small>
+    <button class="primary" id="solve">Solve</button>
+    <button class="secondary" id="compare">Compare all solvers</button>
+    <p id="error" role="alert"></p>
+  </section>
+  <section>
+    <p id="stats">Press Solve to plan routes.</p>
+    <canvas id="map" width="760" height="620"></canvas>
+    <table id="vans" hidden><thead><tr><th>Van</th><th>Stops</th><th>Load</th><th>Distance</th></tr></thead><tbody></tbody></table>
+    <table id="cmp" hidden><thead><tr><th>Solver</th><th>Vans</th><th>Distance</th><th>Time (s)</th></tr></thead><tbody></tbody></table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let csvText = null;
+$('csv').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  csvText = f ? await f.text() : null;
+  $('csvHint').textContent = f ? 'Using ' + f.name : 'Columns: id,x,y,demand';
+});
+const colour = i => `hsl(${(i * 47) % 360} 70% 42%)`;
+
+function params(solver) {
+  const p = { solver, capacity: +$('capacity').value, depot: [+$('dx').value, +$('dy').value] };
+  if (csvText) p.csv = csvText; else { p.n = +$('n').value; p.seed = +$('seed').value; }
+  return p;
+}
+async function api(p) {
+  const r = await fetch('/api/solve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || 'request failed');
+  return j;
+}
+function cell(tr, text) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td; }
+
+function draw(res) {
+  const c = $('map'), g = c.getContext('2d'), pad = 40;
+  g.clearRect(0, 0, c.width, c.height);
+  const xs = [res.depot[0], ...res.orders.map(o => o.x)], ys = [res.depot[1], ...res.orders.map(o => o.y)];
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const sc = Math.min((c.width - 2 * pad) / ((maxX - minX) || 1), (c.height - 2 * pad) / ((maxY - minY) || 1));
+  const X = x => pad + (x - minX) * sc, Y = y => c.height - pad - (y - minY) * sc;
+  const byId = Object.fromEntries(res.orders.map(o => [o.id, o]));
+  res.routes.forEach((route, i) => {
+    g.strokeStyle = colour(i); g.lineWidth = 2.5; g.beginPath();
+    g.moveTo(X(res.depot[0]), Y(res.depot[1]));
+    route.forEach(id => g.lineTo(X(byId[id].x), Y(byId[id].y)));
+    g.lineTo(X(res.depot[0]), Y(res.depot[1])); g.stroke();
+  });
+  const owner = {}; res.routes.forEach((r, i) => r.forEach(id => owner[id] = i));
+  g.font = 'bold 10px Arial'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  res.orders.forEach(o => {
+    g.fillStyle = colour(owner[o.id]); g.beginPath(); g.arc(X(o.x), Y(o.y), 10, 0, 7); g.fill();
+    g.fillStyle = '#fff'; g.fillText(o.id, X(o.x), Y(o.y));
+  });
+  g.fillStyle = '#0b2545'; g.fillRect(X(res.depot[0]) - 9, Y(res.depot[1]) - 9, 18, 18);
+  g.fillStyle = '#f2a541'; g.fillText('D', X(res.depot[0]), Y(res.depot[1]));
+
+  $('stats').textContent = `${res.solver}: ${res.routes.length} vans, total distance ${res.distance}, solved in ${res.seconds}s`;
+  const body = $('vans').querySelector('tbody'); body.replaceChildren();
+  res.routes.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    const first = cell(tr, 'Van ' + (i + 1));
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = colour(i);
+    first.prepend(dot);
+    cell(tr, r.join(' → ')); cell(tr, `${res.loads[i]}/${res.capacity}`); cell(tr, res.lengths[i]);
+    body.appendChild(tr);
+  });
+  $('vans').hidden = false;
+}
+
+async function run(fn, btn) {
+  $('error').textContent = ''; btn.disabled = true;
+  try { await fn(); } catch (e) { $('error').textContent = e.message; } finally { btn.disabled = false; }
+}
+$('solve').onclick = () => run(async () => { $('cmp').hidden = true; draw(await api(params($('solver').value))); }, $('solve'));
+$('compare').onclick = () => run(async () => {
+  const results = [];
+  for (const s of ['greedy', 'greedy-2opt', 'cluster', 'exact']) {
+    try { results.push(await api(params(s))); } catch (e) { if (s !== 'exact') throw e; }
+  }
+  const best = Math.min(...results.map(r => r.distance));
+  const body = $('cmp').querySelector('tbody'); body.replaceChildren();
+  results.forEach(r => {
+    const tr = document.createElement('tr'); tr.className = 'click' + (r.distance === best ? ' best' : '');
+    cell(tr, r.solver); cell(tr, r.routes.length); cell(tr, r.distance); cell(tr, r.seconds);
+    tr.onclick = () => draw(r); body.appendChild(tr);
+  });
+  $('cmp').hidden = false; draw(results[results.length - 1]);
+}, $('compare'));
+</script>
+</body>
+</html>
