@@ -74,7 +74,7 @@ expected O(1).
 * **I/O-bound** (loading many order sources): `asyncio` + `to_thread` (or a thread pool). The GIL is released
   while waiting, so waits overlap. Expect roughly `files x` speed-up over sequential loading.
 
-## Known limitations (say these in the defence)
+## Known limitations
 
 * Cluster solver optimises route *order* well but its clusters are only about half full, so it uses more vans
   than greedy. At large n greedy can travel less; at mid n clustering wins. The benchmark shows both.
